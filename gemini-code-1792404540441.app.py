@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from pyxirr import xirr
-import matplotlib.subplots as plt_sub
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from datetime import datetime
