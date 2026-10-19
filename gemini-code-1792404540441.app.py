@@ -14,7 +14,7 @@ import os
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="MFD Portfolio Analyzer", layout="wide")
 st.title("📊 MFD Portfolio vs Benchmark Analyzer")
-st.write("Upload your client's mutual fund statement to compare their returns against the Nifty 50 index.")
+st.write("Upload your client's mutual fund statement to compare their returns against the Nifty 500 index.")
 
 # --- HELPER FUNCTIONS ---
 @st.cache_data(ttl=3600) 
@@ -209,13 +209,13 @@ if uploaded_file is not None:
             start_date = df['Date'].min().strftime('%Y-%m-%d')
             end_date = (val_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
             
-            with st.spinner('Simulating Index Units & Fetching Nifty 50 NSE Benchmark Data...'):
-                nifty50_series = fetch_benchmark_data('^NSEI', start_date, end_date)
-                nifty50_xirr, nifty_simulated_value = calculate_true_benchmark(nifty50_series, df, val_date)
+            with st.spinner('Simulating Index Units & Fetching Nifty 500 NSE Benchmark Data...'):
+                nifty500_series = fetch_benchmark_data('^CRSLDX', start_date, end_date)
+                nifty500_xirr, nifty_simulated_value = calculate_true_benchmark(nifty500_series, df, val_date)
                 
                 try:
-                    nifty_index_level = nifty50_series.asof(val_date)
-                    if pd.isna(nifty_index_level): nifty_index_level = nifty50_series.dropna().iloc[-1]
+                    nifty_index_level = nifty500_series.asof(val_date)
+                    if pd.isna(nifty_index_level): nifty_index_level = nifty500_series.dropna().iloc[-1]
                 except:
                     nifty_index_level = 0.0
 
@@ -234,8 +234,8 @@ if uploaded_file is not None:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Net Invested", f"₹{net_invested:,.2f}")
             c2.metric("Actual MF Market Value", f"₹{actual_value:,.2f}")
-            c3.metric(f"Nifty 50 Index Level", f"{nifty_index_level:,.2f}")
-            c4.metric("Nifty 50 Simulated Value", f"₹{nifty_simulated_value:,.2f}", delta=f"₹{actual_value - nifty_simulated_value:,.2f} vs Index")
+            c3.metric(f"Nifty 500 Index Level", f"{nifty_index_level:,.2f}")
+            c4.metric("Nifty 500 Simulated Value", f"₹{nifty_simulated_value:,.2f}", delta=f"₹{actual_value - nifty_simulated_value:,.2f} vs Index")
             
             st.markdown("<br>", unsafe_allow_html=True)
             
@@ -243,7 +243,7 @@ if uploaded_file is not None:
             st.subheader("📈 Absolute Return (Total Profit %)")
             ca1, ca2, ca3 = st.columns(3)
             ca1.metric("Client Portfolio (Absolute)", f"{port_abs_ret:.2f}%")
-            ca2.metric("Nifty 50 Benchmark (Absolute)", f"{nifty_abs_ret:.2f}%")
+            ca2.metric("Nifty 500 Benchmark (Absolute)", f"{nifty_abs_ret:.2f}%")
             ca3.metric("Alpha Generated (Absolute)", f"{(port_abs_ret - nifty_abs_ret):.2f}%", delta=f"{(port_abs_ret - nifty_abs_ret):.2f}%")
             
             st.markdown("<br>", unsafe_allow_html=True)
@@ -252,22 +252,22 @@ if uploaded_file is not None:
             st.subheader("⏱️ Annualized Return (Time-Weighted XIRR)")
             cx1, cx2, cx3 = st.columns(3)
             cx1.metric("Client Portfolio XIRR", f"{port_xirr * 100:.2f}%" if port_xirr else "N/A")
-            cx2.metric("Nifty 50 Benchmark XIRR", f"{nifty50_xirr * 100:.2f}%" if nifty50_xirr else "N/A")
-            if port_xirr and nifty50_xirr:
-                alpha_xirr = (port_xirr - nifty50_xirr) * 100
+            cx2.metric("Nifty 500 Benchmark XIRR", f"{nifty500_xirr * 100:.2f}%" if nifty500_xirr else "N/A")
+            if port_xirr and nifty500_xirr:
+                alpha_xirr = (port_xirr - nifty500_xirr) * 100
                 cx3.metric("Alpha Generated (XIRR)", f"{alpha_xirr:.2f}%", delta=f"{alpha_xirr:.2f}%")
 
             # --- COMPARATIVE LINE CHART ---
             st.markdown("---")
             st.subheader("📊 Growth Comparison Over Time")
             
-            if nifty50_series is not None and not nifty50_series.empty:
+            if nifty500_series is not None and not nifty500_series.empty:
                 cashflows = df[df['Type'] == 'CASHFLOW'].sort_values('Date').copy()
                 chart_start = cashflows['Date'].min()
                 
                 daily_dates = pd.date_range(start=chart_start, end=val_date, freq='D')
                 chart_df = pd.DataFrame({'Date': daily_dates})
-                nifty_df = nifty50_series.rename('Nifty_Price').to_frame()
+                nifty_df = nifty500_series.rename('Nifty_Price').to_frame()
                 chart_df = chart_df.merge(nifty_df, left_on='Date', right_index=True, how='left')
                 chart_df['Nifty_Price'] = chart_df['Nifty_Price'].ffill().bfill()
                 
@@ -284,11 +284,11 @@ if uploaded_file is not None:
                 chart_df['Simulated_Nifty_Value'] = chart_df['Cumulative_Units'] * chart_df['Nifty_Price']
                 
                 fig, ax = plt.subplots(figsize=(10, 5))
-                ax.plot(chart_df['Date'], chart_df['Simulated_Nifty_Value'], label='Simulated Nifty 50 Value', color='#ff7f0e', linewidth=2)
+                ax.plot(chart_df['Date'], chart_df['Simulated_Nifty_Value'], label='Simulated Nifty 500 Value', color='#ff7f0e', linewidth=2)
                 ax.plot(chart_df['Date'], chart_df['Cumulative_Invested'], label='Net Cash Invested', color='#1f77b4', linestyle='--')
                 ax.scatter(val_date, actual_value, color='green', s=100, zorder=5, label=f"Actual MF Portfolio Value")
                 
-                ax.set_title("Simulated Nifty 50 Benchmark vs Cash Invested", fontweight='bold')
+                ax.set_title("Simulated Nifty 500 Benchmark vs Cash Invested", fontweight='bold')
                 ax.set_ylabel("Value (₹)")
                 ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
                 ax.grid(True, linestyle='--', alpha=0.5)
