@@ -84,22 +84,35 @@ if uploaded_file is not None:
         pdf_password = st.text_input("🔒 This PDF is locked. Enter Password (usually PAN in uppercase):", type="password")
         
         if pdf_password:
-            with st.spinner("Unlocking, mapping transactions, and consolidating market values..."):
+            with st.spinner("Unlocking, mapping historical cost, and consolidating market values..."):
                 try:
                     cashflows = []
                     total_market_value = 0.0
+                    total_cost_value = 0.0
+                    statement_start_date = None
                     
                     with pdfplumber.open(uploaded_file, password=pdf_password) as pdf:
                         for page in pdf.pages:
                             text = page.extract_text()
                             if text:
-                                # 1. Find and sum ALL individual folio market values across the document
+                                # 1. Extract Statement Period Start Date
+                                if not statement_start_date:
+                                    period_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})\s+To\s+(\d{2}-[A-Za-z]{3}-\d{4})', text, re.IGNORECASE)
+                                    if period_match:
+                                        statement_start_date = pd.to_datetime(period_match.group(1))
+
+                                # 2. Aggregate Total Market Value across all folios
                                 val_matches = re.findall(r'Market Value on (\d{2}-[A-Za-z]{3}-\d{4}).*?((?:\d+,)*\d+\.\d{2})', text, re.IGNORECASE)
                                 for match in val_matches:
                                     val_date_str = match[0]
                                     total_market_value += float(match[1].replace(',', ''))
+                                    
+                                # 3. Aggregate Total Historical Cost Value across all folios
+                                cost_matches = re.findall(r'Total Cost Value:\s*((?:\d+,)*\d+\.\d{2})', text, re.IGNORECASE)
+                                for match in cost_matches:
+                                    total_cost_value += float(match[1].replace(',', ''))
                                 
-                                # 2. Extract transactions
+                                # 4. Extract transaction cashflows
                                 for line in text.split('\n'):
                                     if any(kw in line.upper() for kw in ['PURCHASE', 'SIP', 'REDEEM', 'SWITCH', 'INSTALMENT']):
                                         match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})\s+(.*?)\s+((?:\d+,)*\d+\.\d{2}(?!\d))', line)
@@ -121,11 +134,23 @@ if uploaded_file is not None:
                                             })
                                             
                     if cashflows:
+                        # Reconcile Opening Balance to match exact 'Total Cost Value'
+                        parsed_invested = sum(abs(cf['Amount']) for cf in cashflows if cf['Amount'] < 0)
+                        missing_historical_cost = total_cost_value - parsed_invested
+                        
+                        if missing_historical_cost > 10: # Threshold to ignore minor decimal rounding
+                            inject_date = statement_start_date if statement_start_date else min([cf['Date'] for cf in cashflows])
+                            cashflows.append({
+                                'Scheme': 'Opening Balance (Historical Cost)',
+                                'Date': inject_date,
+                                'Amount': -missing_historical_cost,
+                                'Type': 'CASHFLOW'
+                            })
+
                         df = pd.DataFrame(cashflows)
-                        st.success(f"Mapped {len(df)} transactions successfully!")
+                        st.success(f"Mapped transactions & historical opening balances successfully!")
                         
                         if total_market_value > 0:
-                            st.info(f"✅ Auto-detected Consolidated Portfolio Value: ₹{total_market_value:,.2f} (As of {val_date_str})")
                             val_row = pd.DataFrame([{
                                 'Scheme': 'PDF Portfolio',
                                 'Date': pd.to_datetime(val_date_str),
@@ -186,13 +211,20 @@ if uploaded_file is not None:
             with st.spinner('Simulating Index Units & Fetching Nifty 50 NSE Benchmark Data...'):
                 nifty50_series = fetch_benchmark_data('^NSEI', start_date, end_date)
                 nifty50_xirr, nifty_simulated_value = calculate_true_benchmark(nifty50_series, df, val_date)
+                
+                # Fetch actual Nifty 50 Index Level for display
+                try:
+                    nifty_index_level = nifty50_series.asof(val_date)
+                    if pd.isna(nifty_index_level): nifty_index_level = nifty50_series.dropna().iloc[-1]
+                except:
+                    nifty_index_level = 0.0
 
             # --- METRICS DASHBOARD ---
             st.markdown("---")
             st.subheader("📊 Performance Summary (Annualized CAGR/XIRR)")
             col1, col2, col3 = st.columns(3)
             col1.metric("Client Portfolio Return", f"{port_xirr * 100:.2f}%" if port_xirr else "N/A")
-            col2.metric("Nifty 50 Benchmark", f"{nifty50_xirr * 100:.2f}%" if nifty50_xirr else "N/A")
+            col2.metric("Nifty 50 Benchmark Return", f"{nifty50_xirr * 100:.2f}%" if nifty50_xirr else "N/A")
             if port_xirr and nifty50_xirr:
                 alpha = (port_xirr - nifty50_xirr) * 100
                 col3.metric("Alpha Generated", f"{alpha:.2f}%", delta=f"{alpha:.2f}%")
@@ -200,21 +232,21 @@ if uploaded_file is not None:
             actual_value = df[df['Type'] == 'VALUATION']['Amount'].sum()
             net_invested = abs(df[(df['Type'] == 'CASHFLOW') & (df['Amount'] < 0)]['Amount'].sum()) - df[(df['Type'] == 'CASHFLOW') & (df['Amount'] > 0)]['Amount'].sum()
             
-            st.subheader(f"💰 Valuation Summary (As of {val_date.strftime('%d-%b-%Y')})")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Net Amount Invested", f"₹{net_invested:,.2f}")
+            st.subheader(f"💰 Valuation & Index Data (As of {val_date.strftime('%d-%b-%Y')})")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Net Invested", f"₹{net_invested:,.2f}")
             c2.metric("Actual MF Market Value", f"₹{actual_value:,.2f}")
-            c3.metric("Nifty 50 Simulated Value", f"₹{nifty_simulated_value:,.2f}", delta=f"₹{actual_value - nifty_simulated_value:,.2f} vs Index")
+            c3.metric(f"Nifty 50 Index Level", f"{nifty_index_level:,.2f}")
+            c4.metric("Nifty 50 Simulated Value", f"₹{nifty_simulated_value:,.2f}", delta=f"₹{actual_value - nifty_simulated_value:,.2f} vs Index")
 
             # --- COMPARATIVE LINE CHART ---
             st.subheader("📈 Growth Comparison Over Time")
-            st.info("Note: Because PDF statements only provide your final valuation and not daily historical NAVs for your specific funds, your 'Actual MF Investment' is represented by your total Net Cash Invested over time, concluding with a definitive marker showing your final Portfolio Value today.")
+            st.info("Note: Because PDF statements typically provide a final valuation without daily historical fund NAVs, the blue line represents your total Net Cash Invested over time, concluding with a definitive marker showing your final Actual Portfolio Value today.")
             
             if nifty50_series is not None and not nifty50_series.empty:
                 cashflows = df[df['Type'] == 'CASHFLOW'].sort_values('Date').copy()
                 chart_start = cashflows['Date'].min()
                 
-                # Build Daily Timeseries
                 daily_dates = pd.date_range(start=chart_start, end=val_date, freq='D')
                 chart_df = pd.DataFrame({'Date': daily_dates})
                 nifty_df = nifty50_series.rename('Nifty_Price').to_frame()
@@ -224,23 +256,19 @@ if uploaded_file is not None:
                 daily_cf = cashflows.groupby('Date')['Amount'].sum().reset_index()
                 chart_df = chart_df.merge(daily_cf, on='Date', how='left').fillna({'Amount': 0})
                 
-                # Calculate Daily Cash Position
                 chart_df['Invested'] = np.where(chart_df['Amount'] < 0, abs(chart_df['Amount']), 0)
                 chart_df['Withdrawn'] = np.where(chart_df['Amount'] > 0, chart_df['Amount'], 0)
                 chart_df['Cumulative_Invested'] = chart_df['Invested'].cumsum() - chart_df['Withdrawn'].cumsum()
                 
-                # Calculate Daily Nifty Simulation
                 chart_df['Units_Bought'] = np.where(chart_df['Amount'] < 0, abs(chart_df['Amount']) / chart_df['Nifty_Price'], 0)
                 chart_df['Units_Sold'] = np.where(chart_df['Amount'] > 0, chart_df['Amount'] / chart_df['Nifty_Price'], 0)
                 chart_df['Cumulative_Units'] = chart_df['Units_Bought'].cumsum() - chart_df['Units_Sold'].cumsum()
                 chart_df['Simulated_Nifty_Value'] = chart_df['Cumulative_Units'] * chart_df['Nifty_Price']
                 
-                # Plot
                 fig, ax = plt.subplots(figsize=(10, 5))
                 ax.plot(chart_df['Date'], chart_df['Simulated_Nifty_Value'], label='Simulated Nifty 50 Value', color='#ff7f0e', linewidth=2)
                 ax.plot(chart_df['Date'], chart_df['Cumulative_Invested'], label='Net Cash Invested', color='#1f77b4', linestyle='--')
                 
-                # Mark actual end value
                 ax.scatter(val_date, actual_value, color='green', s=100, zorder=5, label=f"Actual MF Portfolio Value")
                 
                 ax.set_title("Simulated Nifty 50 Benchmark vs Cash Invested", fontweight='bold')
