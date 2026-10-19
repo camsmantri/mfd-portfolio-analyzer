@@ -88,7 +88,6 @@ if uploaded_file is not None:
             with st.spinner("Unlocking, reading formatting, and consolidating market values..."):
                 pwd_to_use = pdf_password if pdf_password else ""
                 
-                # Write to a temporary physical file to prevent Streamlit memory buffer decryption crashes
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_file_path = tmp_file.name
@@ -115,15 +114,15 @@ if uploaded_file is not None:
                                     val_date_str = match[0]
                                     total_market_value += float(match[1].replace(',', ''))
                                     
-                                # 3. Aggregate Total Historical Cost Value
+                                # 3. Aggregate Total Historical Cost Value (BUG FIXED HERE)
                                 cost_matches = re.findall(r'Total Cost Value:.*?((?:\d+,)*\d+\.\d{2})', text, re.IGNORECASE)
-                                for match in cost_matches:
-                                    total_cost_value += float(match[1].replace(',', ''))
+                                for match_str in cost_matches:
+                                    total_cost_value += float(match_str.replace(',', ''))
                                 
                                 # 4. Extract transaction cashflows
                                 for line in text.split('\n'):
                                     if any(kw in line.upper() for kw in ['PURCHASE', 'SIP', 'REDEEM', 'SWITCH', 'INSTALMENT']):
-                                        match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})[\s|]+(.*??)[\s|]+((?:\d+,)*\d+\.\d{2}(?!\d))', line)
+                                        match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})[\s|]+(.*?)[\s|]+((?:\d+,)*\d+\.\d{2}(?!\d))', line)
                                         if match:
                                             date_str = match.group(1)
                                             desc = match.group(2).upper()
@@ -172,10 +171,8 @@ if uploaded_file is not None:
                         st.error("Could not find any standard CAMS/KFintech transactions.")
                         
                 except Exception as e:
-                    # Now it will print the EXACT reason it crashed
                     st.error(f"Failed to process PDF. Error details: {str(e)}")
                 finally:
-                    # Clean up the physical file from the server
                     if os.path.exists(tmp_file_path):
                         os.remove(tmp_file_path)
 
