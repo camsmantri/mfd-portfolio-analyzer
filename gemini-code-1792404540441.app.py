@@ -61,41 +61,72 @@ def calculate_true_benchmark_xirr(benchmark_series, df_trans):
     except:
         return None
 
-# --- FILE UPLOAD & CLEANING ---
-# UPDATED: Now accepts both Excel and PDF
+# --- FILE UPLOAD & PROCESSING ---
 uploaded_file = st.file_uploader("Upload Client Statement (.xlsx or .pdf)", type=["xlsx", "pdf"])
+df = None
+ready_to_calculate = False
 
 if uploaded_file is not None:
     file_extension = uploaded_file.name.split('.')[-1].lower()
-    df = None
     
-    # --- PDF HANDLING ---
+    # === PDF PROCESSING ===
     if file_extension == 'pdf':
         pdf_password = st.text_input("🔒 This PDF is locked. Enter Password (usually PAN in uppercase):", type="password")
         
         if pdf_password:
-            with st.spinner("Unlocking and reading PDF..."):
+            with st.spinner("Unlocking and mapping transactions..."):
                 try:
-                    extracted_data = []
-                    # pdfplumber reads directly from the uploaded file stream
+                    cashflows = []
                     with pdfplumber.open(uploaded_file, password=pdf_password) as pdf:
                         for page in pdf.pages:
                             text = page.extract_text()
                             if text:
                                 for line in text.split('\n'):
-                                    if any(keyword in line.upper() for keyword in ['PURCHASE', 'SIP', 'REDEEM', 'SWITCH']):
-                                        extracted_data.append({'Raw_Transaction_Line': line})
-                                        
-                    if extracted_data:
-                        st.success(f"Successfully unlocked! Extracted {len(extracted_data)} transaction lines.")
-                        st.dataframe(pd.DataFrame(extracted_data))
-                        st.info("💡 Note: To run the full XIRR calculation automatically, an advanced Regex algorithm needs to map these raw text lines into 'Scheme', 'Date', and 'Amount' columns. For now, please use the Excel template for calculations.")
-                    else:
-                        st.warning("Unlocked successfully, but could not detect standard transaction lines.")
-                except Exception as e:
-                    st.error("Incorrect password or unable to read PDF. Please try again.")
+                                    # Look for transaction lines with Dates
+                                    if any(kw in line.upper() for kw in ['PURCHASE', 'SIP', 'REDEEM', 'SWITCH', 'INSTALMENT']):
+                                        # Regex: Looks for Date, Description, and the FIRST number with exactly 2 decimal places (ignoring 3-decimal NAVs)
+                                        match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})\s+(.*?)\s+((?:\d+,)*\d+\.\d{2}(?!\d))', line)
+                                        if match:
+                                            date_str = match.group(1)
+                                            desc = match.group(2).upper()
+                                            amt = float(match.group(3).replace(',', ''))
+                                            
+                                            # Cash outflows (investments) are negative, inflows (redemptions) are positive
+                                            if any(kw in desc for kw in ['REDEEM', 'PAYOUT', 'WITHDRAW', 'SWITCH OUT']):
+                                                amt = abs(amt) 
+                                            else:
+                                                amt = -abs(amt) 
 
-    # --- EXCEL HANDLING (Full Calculation Engine) ---
+                                            cashflows.append({
+                                                'Scheme': 'PDF Portfolio',
+                                                'Date': pd.to_datetime(date_str),
+                                                'Amount': amt
+                                            })
+                                            
+                    if cashflows:
+                        df = pd.DataFrame(cashflows)
+                        st.success(f"Mapped {len(df)} transactions successfully!")
+                        with st.expander("🔍 View Extracted Transactions"):
+                            st.dataframe(df)
+                        
+                        st.info("💡 To calculate the final XIRR return, the software needs the current value of the portfolio.")
+                        current_value = st.number_input("💰 Enter Current Portfolio Value (Found on page 1 of your PDF):", min_value=0.0, step=1000.0)
+                        
+                        if current_value > 0:
+                            # Add the final valuation as a positive cashflow for today
+                            val_row = pd.DataFrame([{
+                                'Scheme': 'PDF Portfolio',
+                                'Date': pd.to_datetime(datetime.today().strftime('%Y-%m-%d')),
+                                'Amount': current_value
+                            }])
+                            df = pd.concat([df, val_row], ignore_index=True)
+                            ready_to_calculate = True
+                    else:
+                        st.warning("Could not map the transactions automatically. Please ensure it is a standard CAMS/KFintech statement.")
+                except Exception as e:
+                    st.error("Incorrect password or unable to read PDF.")
+
+    # === EXCEL PROCESSING ===
     elif file_extension == 'xlsx':
         try:
             df = pd.read_excel(uploaded_file)
@@ -109,37 +140,43 @@ if uploaded_file is not None:
                         
             df.columns = [str(c).strip() for c in df.columns]
             df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-            
-            required_cols = ['Scheme', 'Date', 'Amount']
-            missing = [col for col in required_cols if col not in df.columns]
-            if missing:
-                st.error(f"Missing required columns: {', '.join(missing)}")
-                st.stop()
-                
             df['Date'] = pd.to_datetime(df['Date'])
             df['Amount'] = pd.to_numeric(df['Amount'])
             
             with st.expander("🔍 View Cleaned Transaction Data"):
                 st.dataframe(df)
+            
+            ready_to_calculate = True
+        except Exception as e:
+            st.error(f"Error processing Excel: {e}")
 
-            port_dates, port_amounts = df['Date'].tolist(), df['Amount'].tolist()
+    # === FINAL CALCULATIONS & DASHBOARD ===
+    if ready_to_calculate and df is not None:
+        port_dates = df['Date'].tolist()
+        port_amounts = df['Amount'].tolist()
+        
+        try:
             port_xirr = xirr(port_dates, port_amounts)
-
+            
             start_date = df['Date'].min().strftime('%Y-%m-%d')
             end_date = datetime.today().strftime('%Y-%m-%d')
             
-            with st.spinner('Fetching Nifty 50 Market Data...'):
+            with st.spinner('Calculating Alpha and Fetching Nifty 50 Benchmark Data...'):
                 nifty50_series = fetch_benchmark_data('^NSEI', start_date, end_date)
                 nifty50_xirr = calculate_true_benchmark_xirr(nifty50_series, df)
 
+            # Dashboard UI
+            st.markdown("---")
             st.subheader("📊 Performance Summary")
             col1, col2, col3 = st.columns(3)
             col1.metric("Portfolio XIRR", f"{port_xirr * 100:.2f}%" if port_xirr else "N/A")
             col2.metric("Nifty 50 XIRR (Benchmark)", f"{nifty50_xirr * 100:.2f}%" if nifty50_xirr else "N/A")
+            
             if port_xirr and nifty50_xirr:
                 alpha = (port_xirr - nifty50_xirr) * 100
                 col3.metric("Alpha Generated", f"{alpha:.2f}%", delta=f"{alpha:.2f}%")
 
+            # Growth Chart
             st.subheader("📈 Index Growth Over Investment Period")
             if nifty50_series is not None and not nifty50_series.empty:
                 fig, ax = plt.subplots(figsize=(10, 4))
@@ -158,4 +195,4 @@ if uploaded_file is not None:
                 st.pyplot(fig)
                 
         except Exception as e:
-            st.error(f"An error occurred while processing the Excel file: {e}")
+            st.error(f"Could not calculate returns. Ensure data has at least one investment and a final valuation. ({e})")
