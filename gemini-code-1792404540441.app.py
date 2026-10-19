@@ -8,6 +8,8 @@ import matplotlib.ticker as ticker
 from datetime import datetime
 import pdfplumber
 import re
+import tempfile
+import os
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="MFD Portfolio Analyzer", layout="wide")
@@ -82,18 +84,22 @@ if uploaded_file is not None:
         st.info("If your PDF is password protected (usually your PAN), enter it below. If it is already unlocked, leave this blank.")
         pdf_password = st.text_input("🔒 PDF Password (Optional):", type="password")
         
-        # New Button Flow to prevent auto-running errors
         if st.button("Analyze Portfolio"):
             with st.spinner("Unlocking, reading formatting, and consolidating market values..."):
+                pwd_to_use = pdf_password if pdf_password else ""
+                
+                # Write to a temporary physical file to prevent Streamlit memory buffer decryption crashes
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_file_path = tmp_file.name
+
                 try:
                     cashflows = []
                     total_market_value = 0.0
                     total_cost_value = 0.0
                     statement_start_date = None
                     
-                    pwd_to_use = pdf_password if pdf_password else ""
-                    
-                    with pdfplumber.open(uploaded_file, password=pwd_to_use) as pdf:
+                    with pdfplumber.open(tmp_file_path, password=pwd_to_use) as pdf:
                         for page in pdf.pages:
                             text = page.extract_text()
                             if text:
@@ -114,10 +120,9 @@ if uploaded_file is not None:
                                 for match in cost_matches:
                                     total_cost_value += float(match[1].replace(',', ''))
                                 
-                                # 4. Extract transaction cashflows (UPGRADED REGEX for Pipes '|')
+                                # 4. Extract transaction cashflows
                                 for line in text.split('\n'):
                                     if any(kw in line.upper() for kw in ['PURCHASE', 'SIP', 'REDEEM', 'SWITCH', 'INSTALMENT']):
-                                        # This regex handles native spaces AND the vertical pipes from flattened PDFs
                                         match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})[\s|]+(.*??)[\s|]+((?:\d+,)*\d+\.\d{2}(?!\d))', line)
                                         if match:
                                             date_str = match.group(1)
@@ -165,8 +170,14 @@ if uploaded_file is not None:
                             st.warning("Could not auto-detect the final market value.")
                     else:
                         st.error("Could not find any standard CAMS/KFintech transactions.")
+                        
                 except Exception as e:
-                    st.error("Failed to read PDF. If it requires a password, please ensure it is entered correctly above.")
+                    # Now it will print the EXACT reason it crashed
+                    st.error(f"Failed to process PDF. Error details: {str(e)}")
+                finally:
+                    # Clean up the physical file from the server
+                    if os.path.exists(tmp_file_path):
+                        os.remove(tmp_file_path)
 
     # === EXCEL PROCESSING ===
     elif file_extension == 'xlsx':
@@ -270,4 +281,4 @@ if uploaded_file is not None:
                 st.pyplot(fig)
                 
         except Exception as e:
-            st.error(f"Could not calculate returns. Ensure data has investments and a final valuation. ({e})")
+            st.error(f"Could not calculate returns. Ensure data has investments and a final valuation. Error details: {e}")
