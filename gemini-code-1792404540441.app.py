@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from pyxirr import xirr
+import matplotlib.subplots as plt_sub
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from datetime import datetime
@@ -31,7 +32,6 @@ def calculate_true_benchmark(benchmark_series, df_trans, valuation_date):
         return None, 0.0
         
     df_cashflows = df_trans[df_trans['Type'] == 'CASHFLOW'].sort_values('Date').copy()
-    
     cumulative_units = 0.0
     bm_dates = []
     bm_amounts = []
@@ -61,7 +61,6 @@ def calculate_true_benchmark(benchmark_series, df_trans, valuation_date):
         latest_price = benchmark_series.dropna().iloc[-1]
         
     simulated_val = cumulative_units * latest_price
-    
     bm_dates.append(valuation_date)
     bm_amounts.append(simulated_val) 
     
@@ -81,41 +80,46 @@ if uploaded_file is not None:
     
     # === PDF PROCESSING ===
     if file_extension == 'pdf':
-        pdf_password = st.text_input("🔒 This PDF is locked. Enter Password (usually PAN in uppercase):", type="password")
+        st.info("If your PDF is password protected (usually your PAN), enter it below. If it is already unlocked, leave this blank.")
+        pdf_password = st.text_input("🔒 PDF Password (Optional):", type="password")
         
-        if pdf_password:
-            with st.spinner("Unlocking, mapping historical cost, and consolidating market values..."):
+        # New Button Flow to prevent auto-running errors
+        if st.button("Analyze Portfolio"):
+            with st.spinner("Unlocking, reading formatting, and consolidating market values..."):
                 try:
                     cashflows = []
                     total_market_value = 0.0
                     total_cost_value = 0.0
                     statement_start_date = None
                     
-                    with pdfplumber.open(uploaded_file, password=pdf_password) as pdf:
+                    pwd_to_use = pdf_password if pdf_password else ""
+                    
+                    with pdfplumber.open(uploaded_file, password=pwd_to_use) as pdf:
                         for page in pdf.pages:
                             text = page.extract_text()
                             if text:
-                                # 1. Extract Statement Period Start Date
+                                # 1. Extract Period
                                 if not statement_start_date:
                                     period_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})\s+To\s+(\d{2}-[A-Za-z]{3}-\d{4})', text, re.IGNORECASE)
                                     if period_match:
                                         statement_start_date = pd.to_datetime(period_match.group(1))
 
-                                # 2. Aggregate Total Market Value across all folios
+                                # 2. Aggregate Total Market Value
                                 val_matches = re.findall(r'Market Value on (\d{2}-[A-Za-z]{3}-\d{4}).*?((?:\d+,)*\d+\.\d{2})', text, re.IGNORECASE)
                                 for match in val_matches:
                                     val_date_str = match[0]
                                     total_market_value += float(match[1].replace(',', ''))
                                     
-                                # 3. Aggregate Total Historical Cost Value across all folios
-                                cost_matches = re.findall(r'Total Cost Value:\s*((?:\d+,)*\d+\.\d{2})', text, re.IGNORECASE)
+                                # 3. Aggregate Total Historical Cost Value
+                                cost_matches = re.findall(r'Total Cost Value:.*?((?:\d+,)*\d+\.\d{2})', text, re.IGNORECASE)
                                 for match in cost_matches:
                                     total_cost_value += float(match[1].replace(',', ''))
                                 
-                                # 4. Extract transaction cashflows
+                                # 4. Extract transaction cashflows (UPGRADED REGEX for Pipes '|')
                                 for line in text.split('\n'):
                                     if any(kw in line.upper() for kw in ['PURCHASE', 'SIP', 'REDEEM', 'SWITCH', 'INSTALMENT']):
-                                        match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})\s+(.*?)\s+((?:\d+,)*\d+\.\d{2}(?!\d))', line)
+                                        # This regex handles native spaces AND the vertical pipes from flattened PDFs
+                                        match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})[\s|]+(.*??)[\s|]+((?:\d+,)*\d+\.\d{2}(?!\d))', line)
                                         if match:
                                             date_str = match.group(1)
                                             desc = match.group(2).upper()
@@ -134,11 +138,10 @@ if uploaded_file is not None:
                                             })
                                             
                     if cashflows:
-                        # Reconcile Opening Balance to match exact 'Total Cost Value'
                         parsed_invested = sum(abs(cf['Amount']) for cf in cashflows if cf['Amount'] < 0)
                         missing_historical_cost = total_cost_value - parsed_invested
                         
-                        if missing_historical_cost > 10: # Threshold to ignore minor decimal rounding
+                        if missing_historical_cost > 10: 
                             inject_date = statement_start_date if statement_start_date else min([cf['Date'] for cf in cashflows])
                             cashflows.append({
                                 'Scheme': 'Opening Balance (Historical Cost)',
@@ -148,7 +151,7 @@ if uploaded_file is not None:
                             })
 
                         df = pd.DataFrame(cashflows)
-                        st.success(f"Mapped transactions & historical opening balances successfully!")
+                        st.success("Mapped transactions & historical opening balances successfully!")
                         
                         if total_market_value > 0:
                             val_row = pd.DataFrame([{
@@ -161,41 +164,32 @@ if uploaded_file is not None:
                             ready_to_calculate = True
                         else:
                             st.warning("Could not auto-detect the final market value.")
-                            manual_value = st.number_input("💰 Enter Current Portfolio Value manually:", min_value=0.0, step=1000.0)
-                            if manual_value > 0:
-                                val_row = pd.DataFrame([{
-                                    'Scheme': 'PDF Portfolio',
-                                    'Date': pd.to_datetime(datetime.today().strftime('%Y-%m-%d')),
-                                    'Amount': manual_value,
-                                    'Type': 'VALUATION'
-                                }])
-                                df = pd.concat([df, val_row], ignore_index=True)
-                                ready_to_calculate = True
                     else:
                         st.error("Could not find any standard CAMS/KFintech transactions.")
                 except Exception as e:
-                    st.error(f"Incorrect password or unable to read PDF. Error: {e}")
+                    st.error("Failed to read PDF. If it requires a password, please ensure it is entered correctly above.")
 
     # === EXCEL PROCESSING ===
     elif file_extension == 'xlsx':
-        try:
-            df = pd.read_excel(uploaded_file)
-            df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-            df.columns = [str(c).strip() for c in df.columns]
-            df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-            df['Date'] = pd.to_datetime(df['Date'])
-            df['Amount'] = pd.to_numeric(df['Amount'])
-            
-            if 'Type' not in df.columns:
-                df['Type'] = 'CASHFLOW'
-                last_positive_idx = df[df['Amount'] > 0].index.max()
-                if pd.notna(last_positive_idx):
-                    df.loc[last_positive_idx, 'Type'] = 'VALUATION'
-                    val_date_str = df.loc[last_positive_idx, 'Date'].strftime('%Y-%m-%d')
-            
-            ready_to_calculate = True
-        except Exception as e:
-            st.error(f"Error processing Excel: {e}")
+        if st.button("Analyze Portfolio"):
+            try:
+                df = pd.read_excel(uploaded_file)
+                df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                df.columns = [str(c).strip() for c in df.columns]
+                df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+                df['Date'] = pd.to_datetime(df['Date'])
+                df['Amount'] = pd.to_numeric(df['Amount'])
+                
+                if 'Type' not in df.columns:
+                    df['Type'] = 'CASHFLOW'
+                    last_positive_idx = df[df['Amount'] > 0].index.max()
+                    if pd.notna(last_positive_idx):
+                        df.loc[last_positive_idx, 'Type'] = 'VALUATION'
+                        val_date_str = df.loc[last_positive_idx, 'Date'].strftime('%Y-%m-%d')
+                
+                ready_to_calculate = True
+            except Exception as e:
+                st.error(f"Error processing Excel: {e}")
 
     # === FINAL CALCULATIONS & DASHBOARD ===
     if ready_to_calculate and df is not None:
@@ -212,7 +206,6 @@ if uploaded_file is not None:
                 nifty50_series = fetch_benchmark_data('^NSEI', start_date, end_date)
                 nifty50_xirr, nifty_simulated_value = calculate_true_benchmark(nifty50_series, df, val_date)
                 
-                # Fetch actual Nifty 50 Index Level for display
                 try:
                     nifty_index_level = nifty50_series.asof(val_date)
                     if pd.isna(nifty_index_level): nifty_index_level = nifty50_series.dropna().iloc[-1]
@@ -241,7 +234,6 @@ if uploaded_file is not None:
 
             # --- COMPARATIVE LINE CHART ---
             st.subheader("📈 Growth Comparison Over Time")
-            st.info("Note: Because PDF statements typically provide a final valuation without daily historical fund NAVs, the blue line represents your total Net Cash Invested over time, concluding with a definitive marker showing your final Actual Portfolio Value today.")
             
             if nifty50_series is not None and not nifty50_series.empty:
                 cashflows = df[df['Type'] == 'CASHFLOW'].sort_values('Date').copy()
@@ -268,7 +260,6 @@ if uploaded_file is not None:
                 fig, ax = plt.subplots(figsize=(10, 5))
                 ax.plot(chart_df['Date'], chart_df['Simulated_Nifty_Value'], label='Simulated Nifty 50 Value', color='#ff7f0e', linewidth=2)
                 ax.plot(chart_df['Date'], chart_df['Cumulative_Invested'], label='Net Cash Invested', color='#1f77b4', linestyle='--')
-                
                 ax.scatter(val_date, actual_value, color='green', s=100, zorder=5, label=f"Actual MF Portfolio Value")
                 
                 ax.set_title("Simulated Nifty 50 Benchmark vs Cash Invested", fontweight='bold')
