@@ -14,7 +14,7 @@ import os
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="MFD Portfolio Analyzer", layout="wide")
 st.title("📊 MFD Portfolio vs Benchmark Analyzer")
-st.write("Upload your client's mutual fund statement to compare their exact XIRR against the Nifty 50 index.")
+st.write("Upload your client's mutual fund statement to compare their returns against the Nifty 50 index.")
 
 # --- HELPER FUNCTIONS ---
 @st.cache_data(ttl=3600) 
@@ -114,7 +114,7 @@ if uploaded_file is not None:
                                     val_date_str = match[0]
                                     total_market_value += float(match[1].replace(',', ''))
                                     
-                                # 3. Aggregate Total Historical Cost Value (BUG FIXED HERE)
+                                # 3. Aggregate Total Historical Cost Value
                                 cost_matches = re.findall(r'Total Cost Value:.*?((?:\d+,)*\d+\.\d{2})', text, re.IGNORECASE)
                                 for match_str in cost_matches:
                                     total_cost_value += float(match_str.replace(',', ''))
@@ -219,28 +219,47 @@ if uploaded_file is not None:
                 except:
                     nifty_index_level = 0.0
 
-            # --- METRICS DASHBOARD ---
-            st.markdown("---")
-            st.subheader("📊 Performance Summary (Annualized CAGR/XIRR)")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Client Portfolio Return", f"{port_xirr * 100:.2f}%" if port_xirr else "N/A")
-            col2.metric("Nifty 50 Benchmark Return", f"{nifty50_xirr * 100:.2f}%" if nifty50_xirr else "N/A")
-            if port_xirr and nifty50_xirr:
-                alpha = (port_xirr - nifty50_xirr) * 100
-                col3.metric("Alpha Generated", f"{alpha:.2f}%", delta=f"{alpha:.2f}%")
-
+            # --- CALCULATE ABSOLUTE & NET DATA ---
             actual_value = df[df['Type'] == 'VALUATION']['Amount'].sum()
             net_invested = abs(df[(df['Type'] == 'CASHFLOW') & (df['Amount'] < 0)]['Amount'].sum()) - df[(df['Type'] == 'CASHFLOW') & (df['Amount'] > 0)]['Amount'].sum()
             
+            port_abs_ret = ((actual_value - net_invested) / net_invested) * 100 if net_invested > 0 else 0
+            nifty_abs_ret = ((nifty_simulated_value - net_invested) / net_invested) * 100 if net_invested > 0 else 0
+
+            # --- METRICS DASHBOARD ---
+            st.markdown("---")
+            
+            # 1. Valuation Summary
             st.subheader(f"💰 Valuation & Index Data (As of {val_date.strftime('%d-%b-%Y')})")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Net Invested", f"₹{net_invested:,.2f}")
             c2.metric("Actual MF Market Value", f"₹{actual_value:,.2f}")
             c3.metric(f"Nifty 50 Index Level", f"{nifty_index_level:,.2f}")
             c4.metric("Nifty 50 Simulated Value", f"₹{nifty_simulated_value:,.2f}", delta=f"₹{actual_value - nifty_simulated_value:,.2f} vs Index")
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # 2. Absolute Returns
+            st.subheader("📈 Absolute Return (Total Profit %)")
+            ca1, ca2, ca3 = st.columns(3)
+            ca1.metric("Client Portfolio (Absolute)", f"{port_abs_ret:.2f}%")
+            ca2.metric("Nifty 50 Benchmark (Absolute)", f"{nifty_abs_ret:.2f}%")
+            ca3.metric("Alpha Generated (Absolute)", f"{(port_abs_ret - nifty_abs_ret):.2f}%", delta=f"{(port_abs_ret - nifty_abs_ret):.2f}%")
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # 3. Annualized XIRR
+            st.subheader("⏱️ Annualized Return (Time-Weighted XIRR)")
+            cx1, cx2, cx3 = st.columns(3)
+            cx1.metric("Client Portfolio XIRR", f"{port_xirr * 100:.2f}%" if port_xirr else "N/A")
+            cx2.metric("Nifty 50 Benchmark XIRR", f"{nifty50_xirr * 100:.2f}%" if nifty50_xirr else "N/A")
+            if port_xirr and nifty50_xirr:
+                alpha_xirr = (port_xirr - nifty50_xirr) * 100
+                cx3.metric("Alpha Generated (XIRR)", f"{alpha_xirr:.2f}%", delta=f"{alpha_xirr:.2f}%")
 
             # --- COMPARATIVE LINE CHART ---
-            st.subheader("📈 Growth Comparison Over Time")
+            st.markdown("---")
+            st.subheader("📊 Growth Comparison Over Time")
             
             if nifty50_series is not None and not nifty50_series.empty:
                 cashflows = df[df['Type'] == 'CASHFLOW'].sort_values('Date').copy()
